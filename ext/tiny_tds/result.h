@@ -14,6 +14,7 @@ typedef struct {
   VALUE results;
   rb_encoding *encoding;
   VALUE dbresults_retcodes;
+  VALUE fields_extended;
   unsigned int number_of_results;
   unsigned int number_of_fields;
   unsigned long number_of_rows;

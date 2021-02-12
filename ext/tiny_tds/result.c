@@ -44,6 +44,7 @@ static void rb_tinytds_result_mark(void *ptr) {
     rb_gc_mark(rwrap->fields_processed);
     rb_gc_mark(rwrap->results);
     rb_gc_mark(rwrap->dbresults_retcodes);
+    rb_gc_mark(rwrap->fields_extended);
   }
 }
 
@@ -62,6 +63,7 @@ VALUE rb_tinytds_new_result_obj(tinytds_client_wrapper *cwrap) {
   rwrap->fields_processed = rb_ary_new();
   rwrap->results = Qnil;
   rwrap->dbresults_retcodes = rb_ary_new();
+  rwrap->fields_extended = rb_ary_new();
   rwrap->number_of_results = 0;
   rwrap->number_of_fields = 0;
   rwrap->number_of_rows = 0;
@@ -370,17 +372,25 @@ static VALUE rb_tinytds_result_fields(VALUE self) {
     int symbolize_keys = 0;
     VALUE qopts = rb_iv_get(self, "@query_options");
     if (rb_hash_aref(qopts, sym_symbolize_keys) == Qtrue)
-       symbolize_keys = 1;
+      symbolize_keys = 1;
     /* Set number_of_fields count for this result set. */
     rwrap->number_of_fields = dbnumcols(rwrap->client);
     if (rwrap->number_of_fields > 0) {
       /* Create fields for this result set. */
       unsigned int fldi = 0;
       VALUE fields = rb_ary_new2(rwrap->number_of_fields);
+      VALUE fields_extended = rb_hash_new();
       for (fldi = 0; fldi < rwrap->number_of_fields; fldi++) {
-        char *colname = dbcolname(rwrap->client, fldi+1);
-        VALUE field = symbolize_keys ? rb_str_intern(ENCODED_STR_NEW2(colname))  : rb_obj_freeze(ENCODED_STR_NEW2(colname));
-        rb_ary_store(fields, fldi, field);
+        DBCOL2 col2; 
+        col2.SizeOfStruct = sizeof(col2);
+        dbtablecolinfo(rwrap->client, fldi+1, (DBCOL *) &col2);
+       
+        VALUE downcased = rb_funcall(rb_obj_freeze(ENCODED_STR_NEW2(col2.Name)), rb_intern("downcase"), 0);
+        VALUE key = symbolize_keys ? rb_str_intern(downcased)  : rb_obj_freeze(downcased);
+        VALUE val = rb_obj_freeze(ENCODED_STR_NEW2(col2.ServerTypeDeclaration));
+        
+        rb_ary_store(fields, fldi, key);
+        rb_hash_aset(fields_extended, key, val);
       }
       /* Store the fields. */
       if (rwrap->number_of_results == 0) {
@@ -393,10 +403,19 @@ static VALUE rb_tinytds_result_fields(VALUE self) {
       } else {
         rb_ary_store(rwrap->fields, rwrap->number_of_results, fields);
       }
+      rb_ary_store(rwrap->fields_extended, rwrap->number_of_results, fields_extended);
     }
     rb_ary_store(rwrap->fields_processed, rwrap->number_of_results, Qtrue);
   }
   return rwrap->fields;
+}
+
+static VALUE rb_tinytds_result_fields_extended(VALUE self) {
+  RETCODE dbsqlok_rc, dbresults_rc;
+  VALUE fields_processed;
+  GET_RESULT_WRAPPER(self);
+  
+  return rwrap->fields_extended;
 }
 
 static VALUE rb_tinytds_result_each(int argc, VALUE * argv, VALUE self) {
@@ -439,8 +458,9 @@ static VALUE rb_tinytds_result_each(int argc, VALUE * argv, VALUE self) {
     dbresults_rc = rb_tinytds_result_dbresults_retcode(self);
     while ((dbsqlok_rc == SUCCEED) && (dbresults_rc == SUCCEED)) {
       int has_rows = (DBROWS(rwrap->client) == SUCCEED) ? 1 : 0;
-      if (has_rows || empty_sets || (rwrap->number_of_results == 0))
+      if (has_rows || empty_sets || (rwrap->number_of_results == 0)){
         rb_tinytds_result_fields(self);
+      }
       if ((has_rows || empty_sets) && rwrap->number_of_fields > 0) {
         /* Create rows for this result set. */
         unsigned long rowi = 0;
@@ -572,6 +592,7 @@ void init_tinytds_result() {
   cTinyTdsResult = rb_define_class_under(mTinyTds, "Result", rb_cObject);
   /* Define TinyTds::Result Public Methods */
   rb_define_method(cTinyTdsResult, "fields", rb_tinytds_result_fields, 0);
+  rb_define_method(cTinyTdsResult, "fields_extended", rb_tinytds_result_fields_extended, 0);
   rb_define_method(cTinyTdsResult, "each", rb_tinytds_result_each, -1);
   rb_define_method(cTinyTdsResult, "cancel", rb_tinytds_result_cancel, 0);
   rb_define_method(cTinyTdsResult, "do", rb_tinytds_result_do, 0);
